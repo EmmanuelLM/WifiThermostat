@@ -7,7 +7,7 @@ climate:
     api_key: xxxxx
 """
 
-import socket, logging
+import socket, logging, binascii
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ from homeassistant.const import TEMP_CELSIUS, ATTR_TEMPERATURE
 from homeassistant.helpers.discovery import load_platform
 
 DOMAIN = 'wifithermostat'
-REQUIREMENTS = ['socket']
+REQUIREMENTS = []
 DEPENDENCIES = []
 
 class decode_payload:
@@ -60,7 +60,7 @@ class decode_payload:
 
 
 class wifi_thermostat:
-    def __init__(self, PID):
+    def __init__(self, PID, name):
         self.id_effect = (PID+1)*65535+65535
         self.HOST = '59.110.30.249'
         self.PORT = 25565
@@ -68,6 +68,7 @@ class wifi_thermostat:
         self.mode = 'auto'
         self.power = 'off'
         self.setpoint = None
+        self.name = name
 
     def data_package(self, Command, ID0, ID1, Data0, Data1, Data2, Data3):
         self.Command = int(Command, 0)
@@ -89,45 +90,56 @@ class wifi_thermostat:
         elif self.power == "off":
             powerdata = "0x00"
         payload = self.data_package("0xA2", "0x01", "0x01", powerdata, "0x00", "0x00", "0x00")
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(10)
-        s.connect((self.HOST, self.PORT))
-        data = bytearray.fromhex(hex(self.id_effect)[2:])
-        s.send(data)
-        temp = hex(payload)[2:].rstrip("L")
-        data = bytearray.fromhex(temp)
-        s.send(data)
-        s.close
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(10)
+            s.connect((self.HOST, self.PORT))
+            data = bytearray.fromhex(hex(self.id_effect)[2:])
+            s.send(data)
+            temp = hex(payload)[2:].rstrip("L")
+            data = bytearray.fromhex(temp)
+            s.send(data)
+            s.close
+        except socket.error as err:
+            _LOGGER.error("Could not power on or off")
 
     def set_temperature(self, temperature):
         self.setpoint = str(2*int(temperature))
         payload = self.data_package("0xA6", "0x01", "0x01", "0x00", "0x00", self.setpoint, "0x00")
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(10)
-        s.connect((self.HOST, self.PORT))
-        data = bytearray.fromhex(hex(self.id_effect)[2:])
-        s.send(data)
-        temp = hex(payload)[2:].rstrip("L")
-        data = bytearray.fromhex(temp)
-        s.send(data)
-        s.close
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(10)
+            s.connect((self.HOST, self.PORT))
+            data = bytearray.fromhex(hex(self.id_effect)[2:])
+            s.send(data)
+            temp = hex(payload)[2:].rstrip("L")
+            data = bytearray.fromhex(temp)
+            s.send(data)
+            s.close
+        except socket.error as err:
+            _LOGGER.error("Could not set temperature")
 
     def read_status(self):
         payload = self.data_package("0xA0", "0x01", "0x01", "0x00", "0x00", "0x00", "0x00")
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect((self.HOST, self.PORT))
-        s.settimeout(10)
-        data = bytearray.fromhex(hex(self.id_effect)[2:])
-        s.send(data)
-        temp = hex(payload)[2:].rstrip("L")
-        data = bytearray.fromhex(temp)
-        s.send(data)
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect((self.HOST, self.PORT))
+            s.settimeout(10)
+            data = bytearray.fromhex(hex(self.id_effect)[2:])
+            s.send(data)
+            temp = hex(payload)[2:].rstrip("L")
+            data = bytearray.fromhex(temp)
+            s.send(data)
+            s.close
+        except socket.error as err:
+            _LOGGER.error("Could not read status")
         
-        data2 = s.recv(64).encode("hex")
+#        data2 = s.recv(64).encode("hex")
+        data2 = binascii.hexlify(s.recv(64))
         b = decode_payload(data2)
 
         self.current_temp = float(b.get_data3()) / 2
-        self_setpoint = float(b.get_data2()) / 2
+        self.setpoint = float(b.get_data2()) / 2
         
         self.status = b.get_data0()
         if self.status == 28:
@@ -142,7 +154,7 @@ class wifi_thermostat:
         else:
             self.mode = 'auto'
             self.power = 'on'
-        s.close
+        
             
 
 #-----------------------------------------------------------------------------------------------------------
@@ -151,72 +163,90 @@ class wifi_thermostat:
 
 class WifiThermostat(ClimateDevice):
 
-	def __init__(self, device):
-		self._device = device
-		
-	@property
-	def supported_features(self):
-		return (SUPPORT_TARGET_TEMPERATURE | SUPPORT_ON_OFF)
+    def __init__(self, hass, device):
+        self._device = device
+        self._hass = hass
 
-	@property
-	def should_poll(self):
-		return True
+    @property
+    def supported_features(self):
+        return (SUPPORT_TARGET_TEMPERATURE | SUPPORT_ON_OFF)
 
-	@property
-	def name(self):
-		return "Wifi Thermostat " + self._device.getFriendlyName() + " (" + str(self._device.getID()) + ")"
+    @property
+    def should_poll(self):
+        return True
 
-	@property
-	def temperature_unit(self):
-		return TEMP_CELSIUS
+    @property
+    def name(self):
+        return self._device.name
 
-	@property
-	def current_temperature(self):
-                self._device.read_status()
-		return self._device.current_temp
+    @property
+    def temperature_unit(self):
+        return TEMP_CELSIUS
+    
+    @property
+    def min_temp(self):
+        return 5
+    
+    @property
+    def max_temp(self):
+        return 35
 
-	@property
-	def target_temperature(self):
-                self._device.read_status()
-		return self._device.current_setpoint
+    @property
+    def current_temperature(self):
+        self._device.read_status()
+        return self._device.current_temp
 
-	@property
-	def is_on(self):
-                if device.power == "on":
-                        return True
-                else:
-                        return False
+    @property
+    def target_temperature(self):
+        self._device.read_status()
+        return self._device.setpoint
 
-	def set_temperature(self, **kwargs):
-		if kwargs.get(ATTR_TEMPERATURE) is not None:
-			self._device.set_temperature(kwargs.get(ATTR_TEMPERATURE))
-		self.schedule_update_ha_state()
+    @property
+    def is_on(self):
+        if self._device.power == "on":
+            return True
+        else:
+            return False
 
-	def turn_on(self):
-		self._device.poweronoff("on")
-		self.schedule_update_ha_state()
+    def set_temperature(self, **kwargs):
+        if kwargs.get(ATTR_TEMPERATURE) is not None:
+            self._device.set_temperature(kwargs.get(ATTR_TEMPERATURE))
+                    
 
-	def turn_off(self):
-		self._device.poweronoff("off")
-		self.schedule_update_ha_state()
-		
+    def turn_on(self):
+        self._device.poweronoff("on")
+
+
+    def turn_off(self):
+        self._device.poweronoff("off")
+
+
+    def update(self):
+        self._device.read_status()
+
+
 # ---------------------------------------------------------------
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-	_LOGGER.debug("Adding component: wifi_thermostat ...")
+    _LOGGER.debug("Adding component: wifi_thermostat ...")
 	
-	api_key = config.get("api_key")
+    api_key = config.get("api_key")
+    name = config.get("name")
 
         
-	if api_key is None:
-		_LOGGER.error("Wifi Thermostat: Invalid API KEY !")
-		return False
+    if api_key is None:
+        _LOGGER.error("Wifi Thermostat: Invalid API KEY !")
+        return False
+    
+    if name is None:
+        _LOGGER.error("Wifi Thermostat: Invalid name !")
+        return False
 
-        wt = wifi_thermostat(api_key)
+    wt = wifi_thermostat(api_key, name)
 	
-	add_devices(WifiThermostat(wt))
+    add_devices([WifiThermostat(hass, wt), True])
 	
-	_LOGGER.debug("Wifi Thermostat: Component successfully added !")
-	return True
+    _LOGGER.debug("Wifi Thermostat: Component successfully added !")
+    return True
 
 # ---------------------------------------------------------------
